@@ -12,8 +12,10 @@ from sensor_msgs.msg import NavSatFix, Imu
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32, String
 from coordinate_transformation import CoordinateTransformer
-from tf.transformations import euler_from_quaternion
 from xml.etree import ElementTree as eTree
+
+from scipy.spatial.transform import Rotation
+
 GPS_RUNNING_AVG_ARGS: int = 10
 
 
@@ -55,7 +57,7 @@ class PositionPublisherNode(CompatibleNode):
         self.gps_subscriber = self.new_subscription(
             NavSatFix,
             "/carla/" + self.role_name + "/GPS",
-            self.update_gps_data,
+            self.publish_unfiltered_and_filtered_gps,
             qos_profile=1)
 
         # Publisher
@@ -70,10 +72,14 @@ class PositionPublisherNode(CompatibleNode):
             Imu,
             "/imu_data",
             qos_profile=1)
-
+        # 3D Odometry (GPS) for EKF
+        self.unfiltered_gps_publisher = self.new_publisher(
+            PoseStamped,
+            f"/paf/{self.role_name}/unfiltered_pos",
+            qos_profile=1)
+        # 3D Odometry (GPS)
         self.avg_xyz = np.zeros((GPS_RUNNING_AVG_ARGS, 3))
         self.avg_gps_counter: int = 0
-        # 3D Odometry (GPS)
         self.cur_pos_publisher = self.new_publisher(
             PoseStamped,
             f"/paf/{self.role_name}/current_pos",
@@ -154,14 +160,25 @@ class PositionPublisherNode(CompatibleNode):
                               data.orientation.z,
                               data.orientation.w]
 
-        roll, pitch, yaw = euler_from_quaternion(data_orientation_q)
-        raw_heading = math.atan2(roll, pitch)
+        # Create a Rotation object from the quaternion
+        rotation = Rotation.from_quat(data_orientation_q)
+        # Convert the Rotation object to a matrix
+        rotation_matrix = rotation.as_matrix()
+        # calculate the angle around the z-axis (theta) from the matrix
+        theta = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
+
+        raw_heading = theta
 
         # transform raw_heading so that:
         # ---------------------------------------------------------------
         # | 0 = x-axis | pi/2 = y-axis | pi = -x-axis | -pi/2 = -y-axis |
         # ---------------------------------------------------------------
         heading = (raw_heading - (math.pi / 2)) % (2 * math.pi) - math.pi
+
+        # TODO delete
+        # self.loginfo('yaw: ' + str(yaw) + '; GPTYaw: ' + str(GPTYaw) +
+        # '; Heading ' + str(heading) + '; diff: ' + str(yaw - GPTYaw))
+
         self.__heading = heading
         self.__heading_publisher.publish(self.__heading)
 
@@ -205,6 +222,51 @@ class PositionPublisherNode(CompatibleNode):
             cur_pos.pose.orientation.w = 0
 
             self.cur_pos_publisher.publish(cur_pos)
+
+    def publish_unfiltered_gps(self, data: NavSatFix):
+        """
+        This method is called when new GNSS data is received.
+        It publishes the raw data.
+        :param data: GNSS measurement
+        :return:
+        """
+        # Make sure position is only published when reference values have been
+        # read from the Map
+        if CoordinateTransformer.ref_set is False:
+            self.transformer = CoordinateTransformer()
+            CoordinateTransformer.ref_set = True
+        if CoordinateTransformer.ref_set is True:
+            lat = data.latitude
+            lon = data.longitude
+            alt = data.altitude
+
+            x, y, z = self.transformer.gnss_to_xyz(lat, lon, alt)
+
+            unfiltered_pos = PoseStamped()
+
+            unfiltered_pos.header.stamp = data.header.stamp
+            unfiltered_pos.header.frame_id = "global"
+
+            unfiltered_pos.pose.position.x = x
+            unfiltered_pos.pose.position.y = y
+            unfiltered_pos.pose.position.z = z
+
+            unfiltered_pos.pose.orientation.x = 0
+            unfiltered_pos.pose.orientation.y = 0
+            unfiltered_pos.pose.orientation.z = 1
+            unfiltered_pos.pose.orientation.w = 0
+
+            self.unfiltered_gps_publisher.publish(unfiltered_pos)
+
+    def publish_unfiltered_and_filtered_gps(self, data: NavSatFix):
+        """
+        This method is called when new GNSS data is received.
+        It publishes the raw data and the filtered data.
+        :param data: GNSS measurement
+        :return:
+        """
+        self.publish_unfiltered_gps(data)
+        self.update_gps_data(data)
 
     def run(self):
         """
