@@ -1,0 +1,81 @@
+name: License check
+
+# Fails the build if a disallowed / incompatible dependency is (re)introduced into
+# the shipped agent's Python requirements, or if a ROS package fails to declare a
+# license. This is a cheap, deterministic source-level guard that complements (it
+# does NOT replace) the image-level SBOM produced by build.yml.
+#
+# It exists primarily to prevent the Ultralytics (AGPL-3.0) regression that this
+# project already had to fix once. See THIRD_PARTY_LICENSES.md for rationale.
+
+on:
+  pull_request:
+    branches:
+      - main
+      - ros2-dev
+  push:
+    branches:
+      - main
+
+jobs:
+  license-check:
+    name: Check dependencies & package licenses
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - name: Fail on forbidden dependencies in shipped requirements
+        run: |
+          set -e
+          # Patterns that indicate a copyleft / non-commercial / AGPL dependency
+          # incompatible with the MIT-licensed shipped agent.
+          deny='ultralytics|super-gradients|yolo-nas|yolonas|\\bgpl|\\bagpl|\\blgpl|\\bsspl|cc-by-nc'
+          # Only scan requirements that feed the shipped agent image:
+          # code/requirements*.txt (NOT doc/.../experiments/**, which are
+          # one-off evaluations and may legitimately use restricted libs).
+          hits=$(git ls-files 'code/requirements*.txt' \
+                 | xargs -r grep -Eni "$deny" || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Forbidden/incompatible dependency found in shipped requirements:"
+            echo "$hits"
+            echo "::error::See THIRD_PARTY_LICENSES.md. These licenses conflict with the MIT agent."
+            exit 1
+          fi
+          echo "No forbidden dependencies in code/requirements*.txt."
+
+      - name: Fail on missing or TODO package licenses (shipped code only)
+        run: |
+          set -e
+          bad=0
+          while IFS= read -r f; do
+            # <license> must be present, non-empty and not the catkin default 'TODO'
+            if ! grep -q '<license>[^<]*</license>' "$f"; then
+              echo "::error::$f is missing a <license> declaration."
+              bad=1
+            elif grep -q '<license>TODO</license>' "$f"; then
+              echo "::error::$f still has the default <license>TODO</license>."
+              bad=1
+            fi
+          done < <(git ls-files 'code/**/package.xml')
+          exit $bad
+
+      - name: Verify committed model checksums against manifest
+        run: |
+          set -e
+          # Re-hash committed model files and ensure MODELS.yaml matches.
+          f="code/perception/traffic_light_detection/models/model_acc_92.48_val_91.88.pt"
+          if [ -f "$f" ]; then
+            actual=$(sha256sum "$f" | awk '{print $1}')
+            expected=$(grep -E '^\s*sha256:' code/perception/MODELS.yaml \
+                       | head -1 | awk '{print $2}')
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::Model checksum mismatch for $f"
+              echo "  manifest: $expected"
+              echo "  actual:   $actual"
+              echo "Update the sha256 in code/perception/MODELS.yaml."
+              exit 1
+            fi
+            echo "Model checksum matches manifest: $actual"
+          fi

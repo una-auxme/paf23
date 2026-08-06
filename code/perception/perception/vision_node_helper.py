@@ -1,4 +1,4 @@
-# Carla-Farben
+# CARLA visualization colors, indexed by CARLA class id (0..12)
 carla_colors = [
     [0, 0, 0],  # 0: None
     [70, 70, 70],  # 1: Buildings
@@ -15,88 +15,52 @@ carla_colors = [
     [220, 220, 0],  # 12: TrafficSigns
 ]
 
-# COCO-Klassen → Carla-Klassen Mapping
-coco_to_carla = [
-    4,  # 0: Person -> Pedestrians
-    10,  # 1: Bicycle -> Vehicles
-    10,  # 2: Car -> Vehicles
-    10,  # 3: Motorbike -> Vehicles
-    10,  # 4: Airplane -> Vehicles
-    10,  # 5: Bus -> Vehicles
-    10,  # 6: Train -> Vehicles
-    10,  # 7: Truck -> Vehicles
-    10,  # 8: Boat -> Vehicles
-    12,  # 9: Traffic Light -> TrafficSigns
-    3,  # 10: Fire Hydrant -> Other
-    12,  # 11: Stop Sign -> TrafficSigns
-    3,  # 12: Parking Meter -> Other
-    3,  # 13: Bench -> Other
-    3,  # 14: Bird -> Other
-    3,  # 15: Cat -> Other
-    3,  # 16: Dog -> Other
-    3,  # 17: Horse -> Other
-    3,  # 18: Sheep -> Other
-    3,  # 19: Cow -> Other
-    3,  # 20: Elephant -> Other
-    3,  # 21: Bear -> Other
-    3,  # 22: Zebra -> Other
-    3,  # 23: Giraffe -> Other
-    3,  # 24: Backpack -> Other
-    3,  # 25: Umbrella -> Other
-    3,  # 26: Handbag -> Other
-    3,  # 27: Tie -> Other
-    3,  # 28: Suitcase -> Other
-    3,  # 29: Frisbee -> Other
-    3,  # 30: Skis -> Other
-    3,  # 31: Snowboard -> Other
-    3,  # 32: Sports Ball -> Other
-    3,  # 33: Kite -> Other
-    3,  # 34: Baseball Bat -> Other
-    3,  # 35: Baseball Glove -> Other
-    3,  # 36: Skateboard -> Other
-    3,  # 37: Surfboard -> Other
-    3,  # 38: Tennis Racket -> Other
-    3,  # 39: Bottle -> Other
-    3,  # 40: Wine Glass -> Other
-    3,  # 41: Cup -> Other
-    3,  # 42: Fork -> Other
-    3,  # 43: Knife -> Other
-    3,  # 44: Spoon -> Other
-    3,  # 45: Bowl -> Other
-    3,  # 46: Banana -> Other
-    3,  # 47: Apple -> Other
-    3,  # 48: Sandwich -> Other
-    3,  # 49: Orange -> Other
-    3,  # 50: Broccoli -> Other
-    3,  # 51: Carrot -> Other
-    3,  # 52: Hot Dog -> Other
-    3,  # 53: Pizza -> Other
-    3,  # 54: Donut -> Other
-    3,  # 55: Cake -> Other
-    3,  # 56: Chair -> Other
-    3,  # 57: Couch -> Other
-    3,  # 58: Potted Plant -> Other
-    3,  # 59: Bed -> Other
-    3,  # 60: Dining Table -> Other
-    3,  # 61: Toilet -> Other
-    3,  # 62: TV -> Other
-    3,  # 63: Laptop -> Other
-    3,  # 64: Mouse -> Other
-    3,  # 65: Remote -> Other
-    3,  # 66: Keyboard -> Other
-    3,  # 67: Cell Phone -> Other
-    3,  # 68: Microwave -> Other
-    3,  # 69: Oven -> Other
-    3,  # 70: Toaster -> Other
-    3,  # 71: Sink -> Other
-    3,  # 72: Refrigerator -> Other
-    3,  # 73: Book -> Other
-    3,  # 74: Clock -> Other
-    3,  # 75: Vase -> Other
-    3,  # 76: Scissors -> Other
-    3,  # 77: Teddy Bear -> Other
-    3,  # 78: Hair Drier -> Other
-    3,  # 79: Toothbrush -> Other
+# Human-readable names, indexed by CARLA class id (0..12)
+carla_class_names = [
+    "None",
+    "Buildings",
+    "Fences",
+    "Other",
+    "Pedestrians",
+    "Poles",
+    "RoadLines",
+    "Roads",
+    "Sidewalks",
+    "Vegetation",
+    "Vehicles",
+    "Walls",
+    "TrafficSigns",
 ]
+
+# COCO category ids as emitted by torchvision detection models
+# (category_id, 0 == background).
+# See: https://pytorch.org/vision/stable/models.html#object-detection
+PERSON_LABEL = 1
+TRAFFIC_LIGHT_LABEL = 10
+
+
+def _build_tvrcnn_label_to_carla():
+    """Map a torchvision COCO category_id (index) to a CARLA class id.
+
+    Default is 3 (Other); only the categories relevant for driving are mapped.
+    This reproduces the same CARLA classes that the previous ultralytics-based
+    mapping produced, so downstream consumers are unaffected.
+    """
+    mapping = [3] * 91  # indices 0..90, 0 == background -> Other
+    mapping[PERSON_LABEL] = 4  # Person -> Pedestrians
+    mapping[2] = 10  # Bicycle -> Vehicles
+    mapping[3] = 10  # Car -> Vehicles
+    mapping[4] = 10  # Motorbike -> Vehicles
+    mapping[5] = 10  # Airplane -> Vehicles
+    mapping[6] = 10  # Bus -> Vehicles
+    mapping[7] = 10  # Train -> Vehicles
+    mapping[8] = 10  # Truck -> Vehicles
+    mapping[9] = 10  # Boat -> Vehicles
+    mapping[TRAFFIC_LIGHT_LABEL] = 12  # Traffic Light -> TrafficSigns
+    mapping[13] = 12  # Stop Sign -> TrafficSigns
+    return mapping
+
+
+tvrcnn_label_to_carla = _build_tvrcnn_label_to_carla()
 
 COCO_CLASS_COUNT = 80

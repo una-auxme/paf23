@@ -427,7 +427,7 @@ class Entity:
 
     Prefixed with the sensor node name to make sure ids stay unique between sensors.
 
-    Mainly set from the tracking id outputs of the yolov11 model.
+    Mainly set from the tracking id outputs of the object-detection model.
     """
     motion: Optional[Motion2D] = None
     """The motion of this entity

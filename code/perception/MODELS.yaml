@@ -1,0 +1,99 @@
+# Model manifest for PAF
+#
+# Records the provenance, checksum and license of every model used by the shipped
+# agent (the `code/` ROS 2 packages). One entry under `models:` per model; entries
+# under `excluded:` document models that are deliberately NOT used and why.
+# Keep this in sync when a model is added, retrained or its download source changes.
+#
+# A model can carry restrictions inherited from: pretrained initialisation weights,
+# training datasets, dataset terms of use, annotation sources, imported training
+# code, or redistribution rules on the produced weights. Each field below exists to
+# make those facts auditable.
+
+models:
+  # -------------------------------------------------------------------------
+  # 1. Traffic-light classifier (COMMITTED in this repository)
+  # -------------------------------------------------------------------------
+  - name: traffic_light_classifier
+    version: model_acc_92.48_val_91.88
+    description: >
+      Small custom CNN that classifies cropped traffic-light images
+      (green/yellow/red/back). Trained in-repo via the DVC experiment pipeline.
+    path: code/perception/traffic_light_detection/models/model_acc_92.48_val_91.88.pt
+    sha256: 4f4860418af5479f45555549b72198a9efd9c77abd04428fbe375fca68dc7f15
+    model_license: MIT                 # project-owned weights
+    creator: PAF contributors
+    copyright_holder: UNA-AuxMe / PAF contributors
+    redistribution_allowed: true
+    architecture: >
+      From-scratch CNN (4 conv layers + linear head). NO pretrained backbone,
+      NO external initialisation checkpoint. See
+      `code/perception/traffic_light_detection/src/classification_model.py`.
+    initial_checkpoint: none
+    training_code: code/perception/traffic_light_detection/src/traffic_light_training.py
+    training_pipeline: code/perception/traffic_light_detection/dvc.yaml
+    training_datasets:
+      - name: traffic_light_dataset
+        source: generated from the CARLA simulator (RGB camera crops)
+        managed_by: DVC (code/perception/traffic_light_detection/dataset.dvc)
+        # Dataset is NOT stored in Git; it is materialised via `dvc pull`.
+        license: >
+          CARLA is MIT-licensed; simulator-generated screenshots used for
+          training are project-owned.
+        notes: >
+          Confirm the dataset contains no third-party images before any
+          redistribution of derived weights. As currently produced, all
+          training images are rendered by CARLA.
+    verification: "sha256sum -c  # recompute and compare the sha256 above"
+
+  # -------------------------------------------------------------------------
+  # 2. Object-detection models (AUTO-DOWNLOADED at runtime by vision_node.py)
+  #    Default: fasterrcnn_resnet50_fpn_v2. Selected via the `model` ROS param.
+  # -------------------------------------------------------------------------
+  - name: fasterrcnn_resnet50_fpn_v2
+    framework: torchvision
+    description: Primary object detector (vehicles/pedestrians/traffic lights).
+    auto_downloaded: true
+    download_source: https://download.pytorch.org/models/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth
+    how_fetched: >
+      torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(
+      weights=FasterRCNN_ResNet50_FPN_V2_Weights.DEFAULT) on first launch of
+      vision_node (vision_node.py).
+    code_license: BSD-3-Clause  # torchvision
+    weights_license: >
+      COCO dataset license (permissive for research use). See
+      https://pytorch.org/vision/stable/models.html and
+      https://cocodataset.org/#termsofuse
+    redistribution_allowed: true-with-attribution   # keep torchvision/COCO notices
+    alternatives_available_in_code:
+      - fasterrcnn_mobilenet_v3_large_320_fpn   # fastest
+      - retinanet_resnet50_fpn_v2
+
+  # -------------------------------------------------------------------------
+  # 3. Lane detection model (AUTO-DOWNLOADED at runtime by Lanedetection_node.py)
+  # -------------------------------------------------------------------------
+  - name: yolop
+    description: Lane / drivable-area detection.
+    auto_downloaded: true
+    how_fetched: 'torch.hub.load("hustvl/yolop", "yolop", pretrained=True)'
+    download_source: https://github.com/hustvl/YOLOP
+    code_license: MIT             # YOLOP repository
+    weights_license: MIT          # YOLOP ships pretrained weights under MIT
+    redistribution_allowed: true-with-attribution
+    notes: >
+      Weights are fetched from the upstream repo at runtime and are NOT vendored
+      or committed to this repository. Pinning the exact hub commit is a follow-up
+      (see "Remaining work" in THIRD_PARTY_LICENSES.md).
+
+# Models that are EXPLICITLY NOT used by the shipped agent.
+excluded:
+  - name: ultralytics (YOLOv8 / YOLO11)
+    reason: >
+      AGPL-3.0 license is incompatible with this MIT project for the combined
+      work. Removed from code/requirements.txt and vision_node.py. Must NOT be
+      reintroduced into the shipped agent. The CI guard
+      (.github/workflows/license-check.yml) fails the build if it reappears.
+  - name: YOLO-NAS (super-gradients) weights
+    reason: >
+      Non-commercial / research-only weight license. Only used once for a
+      one-off evaluation in doc/perception/experiments; never redistributed.

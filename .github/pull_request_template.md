@@ -31,3 +31,10 @@ Which files functionalities are most important in this PR. On which part should 
 - [ ] I have added tests that prove my fix is effective or that my feature works (might be obsolete with CI later on)
 - [ ] New and existing unit tests pass locally with my changes (might be obsolete with CI later on)
 
+## Licensing & provenance
+
+- [ ] My commits are signed off (`Signed-off-by: ...`, i.e. `git commit -s`) — I agree to the [Developer Certificate of Origin](https://developercertificate.org/) and that my contribution is licensed under the project's MIT License (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
+- [ ] I have **not** added any AGPL/GPL/LGPL/SSPL or "non-commercial"/"research-only" dependency to the shipped agent (`code/requirements*.txt`) — e.g. **no `ultralytics`**.
+- [ ] Any third-party/copied code keeps the original copyright + license notice, and I added it to [THIRD_PARTY_LICENSES.md](../THIRD_PARTY_LICENSES.md).
+- [ ] Any new/retrained model is recorded in [code/perception/MODELS.yaml](../code/perception/MODELS.yaml) with checksum + license.
+

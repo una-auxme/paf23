@@ -1,16 +1,10 @@
 from typing import List
 import copy
-from sklearn.cluster import DBSCAN
-import torch
+
 import cv2
-from sensor_msgs.msg import Image as ImageMsg
-from perception_interfaces.msg import TrafficLightImages
-from cv_bridge import CvBridge
-from torchvision.utils import draw_segmentation_masks
 import numpy as np
-from ultralytics import YOLO
-from ultralytics.utils.ops import scale_masks
-from mapping_interfaces.msg import ClusteredPointsArray
+import torch
+from sklearn.cluster import DBSCAN
 
 import rclpy
 from rclpy.node import Node
@@ -18,7 +12,31 @@ from rcl_interfaces.msg import ParameterDescriptor
 from paf_common.parameters import update_attributes
 from rclpy.parameter import Parameter
 
-from .vision_node_helper import coco_to_carla, carla_colors
+from cv_bridge import CvBridge
+from sensor_msgs.msg import Image as ImageMsg
+from perception_interfaces.msg import TrafficLightImages
+from mapping_interfaces.msg import ClusteredPointsArray
+
+# Permissively-licensed (BSD-3-Clause) detectors from torchvision.
+# NOTE: This intentionally replaces the AGPL-3.0 `ultralytics` (YOLOv8/YOLO11)
+# models previously used here, which were incompatible with this MIT-licensed
+# project. See THIRD_PARTY_LICENSES.md for details.
+from torchvision.models.detection import (
+    fasterrcnn_resnet50_fpn_v2,
+    FasterRCNN_ResNet50_FPN_V2_Weights,
+    fasterrcnn_mobilenet_v3_large_320_fpn,
+    FasterRCNN_MobileNet_V3_Large_320_FPN_Weights,
+    retinanet_resnet50_fpn_v2,
+    RetinaNet_ResNet50_FPN_V2_Weights,
+)
+from torchvision.utils import draw_bounding_boxes
+
+from .vision_node_helper import (
+    tvrcnn_label_to_carla,
+    carla_class_names,
+    carla_colors,
+    TRAFFIC_LIGHT_LABEL,
+)
 from .perception_utils import array_to_clustered_points
 
 
@@ -26,24 +44,34 @@ class VisionNode(Node):
     """
     VisionNode:
 
-    The Vision-Node provides advanced object-detection features.
-    It can handle different camera angles, easily switch between
-    pretrained models and distances of objects.
+    The Vision-Node provides object-detection features.
+    It can handle different camera angles and easily switch between
+    pretrained torchvision detection models.
 
-    Advanced features are limited to ultralytics models and center view.
+    Detection is performed with permissively-licensed torchvision models
+    (Apache/BSD-licensed COCO weights). Each detection's bounding box is
+    converted to a binary mask so that the existing lidar-point extraction,
+    clustering and downstream mapping pipeline stay unchanged.
     """
 
     def __init__(self):
         super().__init__(type(self).__name__)
         self.get_logger().info(f"{type(self).__name__} node initializing...")
 
-        # dictionary of pretrained models
+        # dictionary of pretrained models: name -> (factory, weights_enum)
         self.model_dict = {
-            "yolov8x-seg": (YOLO, "yolov8x-seg.pt", "segmentation", "ultralytics"),
-            "yolo11n-seg": (YOLO, "yolo11n-seg.pt", "segmentation", "ultralytics"),
-            "yolo11s-seg": (YOLO, "yolo11s-seg.pt", "segmentation", "ultralytics"),
-            "yolo11m-seg": (YOLO, "yolo11m-seg.pt", "segmentation", "ultralytics"),
-            "yolo11l-seg": (YOLO, "yolo11l-seg.pt", "segmentation", "ultralytics"),
+            "fasterrcnn_resnet50_fpn_v2": (
+                fasterrcnn_resnet50_fpn_v2,
+                FasterRCNN_ResNet50_FPN_V2_Weights,
+            ),
+            "fasterrcnn_mobilenet_v3_large_320_fpn": (
+                fasterrcnn_mobilenet_v3_large_320_fpn,
+                FasterRCNN_MobileNet_V3_Large_320_FPN_Weights,
+            ),
+            "retinanet_resnet50_fpn_v2": (
+                retinanet_resnet50_fpn_v2,
+                RetinaNet_ResNet50_FPN_V2_Weights,
+            ),
         }
 
         # general setup
@@ -66,9 +94,20 @@ class VisionNode(Node):
             .integer_value
         )
         self.model = (
-            self.declare_parameter("model", "yolo11m-seg")
+            self.declare_parameter("model", "fasterrcnn_resnet50_fpn_v2")
             .get_parameter_value()
             .string_value
+        )
+        self.score_threshold = (
+            self.declare_parameter(
+                "score_threshold",
+                0.5,
+                descriptor=ParameterDescriptor(
+                    description="Minimum detection confidence to keep a box",
+                ),
+            )
+            .get_parameter_value()
+            .double_value
         )
         # Traffic light parameters
         self.min_x: int = (
@@ -171,22 +210,20 @@ class VisionNode(Node):
 
     def setup_model(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model_info = self.model_dict[self.model]
-        self.model = model_info[0]
-        self.weights = model_info[1]
-        self.type = model_info[2]
-        self.framework = model_info[3]
-        self.save = True
-
-        print("Vision Node Configuration:")
-        print("Device -> ", self.device)
-        print(f"Model -> {self.model},")
-        print(f"Type -> {self.type}, Framework -> {self.framework}")
-
-        if self.framework == "ultralytics":
-            self.model = self.model(self.weights)
-        else:
-            self.get_logger().error("Framework not supported")
+        if self.model not in self.model_dict:
+            available = ", ".join(self.model_dict.keys())
+            raise ValueError(
+                f"Model '{self.model}' is not supported. Available: {available}"
+            )
+        factory, weights_enum = self.model_dict[self.model]
+        self.get_logger().info(
+            f"Loading torchvision model '{self.model}' on device '{self.device}' "
+            f"(weights: {weights_enum.DEFAULT})"
+        )
+        # Weights are downloaded from download.pytorch.org on first use.
+        self.model = factory(weights=weights_enum.DEFAULT)
+        self.model.eval()
+        self.model.to(self.device)
 
     def handle_camera_image(self, image):
         """
@@ -196,15 +233,15 @@ class VisionNode(Node):
         Args:
             image (image msg): Image from camera scubscription
         """
-        prediction = self.predict_ultralytics(
+        prediction = self.predict(
             image=image,
             image_size=self.camera_resolution,
             lidar_array=copy.deepcopy(self.lidar_array),
         )
 
         if self.view_camera and prediction is not None:
-            (cv_image, scaled_masks, carla_classes) = prediction
-            self.publish_image(cv_image, image.header, scaled_masks, carla_classes)
+            cv_image, boxes, carla_classes = prediction
+            self.publish_image(cv_image, image.header, boxes, carla_classes)
 
     def handle_lidar_array(self, lidar_array):
         """
@@ -226,72 +263,77 @@ class VisionNode(Node):
         lidar_array_copy[..., 2] += 1.7
         self.lidar_array = lidar_array_copy
 
-    def predict_ultralytics(self, image, lidar_array, image_size=640):
-        """
-        This function takes in an image from a camera, predicts
-        an ultralytics model on the image and looks for lidar points
-        in the bounding boxes.
+    def _boxes_to_masks(self, boxes, image_shape):
+        """Convert xyxy bounding boxes to boolean masks of shape (N, H, W).
 
-        This function also implements a visualization
-        of what has been calculated for RViz.
+        Each box becomes a filled rectangle so it can be fed into the existing
+        segmentation-mask based lidar-point extraction.
+        """
+        h, w = image_shape[:2]
+        masks = np.zeros((len(boxes), h, w), dtype=bool)
+        for i, (x1, y1, x2, y2) in enumerate(boxes):
+            x1 = int(max(0, min(w, x1)))
+            y1 = int(max(0, min(h, y1)))
+            x2 = int(max(0, min(w, x2)))
+            y2 = int(max(0, min(h, y2)))
+            if x2 > x1 and y2 > y1:
+                masks[i, y1:y2, x1:x2] = True
+        return masks
+
+    def predict(self, image, lidar_array, image_size=640):
+        """
+        This function takes in an image from a camera, runs a torchvision
+        detection model on it and looks for lidar points inside the
+        detected bounding boxes.
+
+        This function also implements a visualization of what has been
+        calculated for RViz.
 
         Args:
             image (image msg): image from camera subsription
 
         Returns:
-            (cv image): visualization output for rvizw
+            (cv image, boxes, carla_classes): visualization output for rviz
+                and the raw detections, or None if nothing was detected.
         """
         if lidar_array is None or lidar_array.size == 0:
             self.get_logger().warn("No valid lidar data found", throttle_duration_sec=2)
             return None
-        scaled_masks = None
         cv_image = self.bridge.imgmsg_to_cv2(
             img_msg=image, desired_encoding="passthrough"
         )
         # image is with encoding bgr8 therefore we need to convert it to rgb
         cv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
 
-        output = self.model(
-            cv_image,
-            half=True,
-            verbose=False,
-            imgsz=image_size,  # type: ignore
+        # torchvision detection models expect float tensors in [0, 1], CHW
+        img_tensor = (
+            torch.from_numpy(cv_image).permute(2, 0, 1).to(dtype=torch.float32) / 255.0
         )
-        if (
-            not hasattr(output[0], "masks")
-            or output[0].masks is None
-            or len(output[0].boxes) == 0
-            or not hasattr(output[0], "boxes")
-            or output[0].boxes is None
-            or len(output[0].boxes) == 0
-        ):
+        img_tensor = img_tensor.to(self.device)
+
+        with torch.inference_mode():
+            output = self.model([img_tensor])[0]
+
+        boxes = output["boxes"].cpu().numpy()
+        labels = output["labels"].cpu().numpy()
+        scores = output["scores"].cpu().numpy()
+
+        keep = scores >= self.score_threshold
+        boxes, labels = boxes[keep], labels[keep]
+
+        if len(boxes) == 0:
             self.pointcloud_publisher.publish(ClusteredPointsArray())
             return None
-        box_classes = output[0].boxes.cls.int().cpu().numpy()
-        carla_classes = np.array(coco_to_carla)[box_classes]
-        masks = output[0].masks.data.clone().detach().cpu()
-        # check if the masks and box_classess size is correct
-        if masks.size(0) != len(box_classes):
-            self.get_logger().error(
-                "Masks and box classes size mismatch", throttle_duration_sec=2
-            )
-            self.pointcloud_publisher.publish(ClusteredPointsArray())
-            return None
+
+        carla_classes = np.asarray(tvrcnn_label_to_carla)[labels]
 
         # proceed with traffic light detection
-        if 9 in box_classes:
-            self.process_traffic_lights(output[0], cv_image, image.header)
+        if TRAFFIC_LIGHT_LABEL in labels:
+            self.process_traffic_lights(boxes, scores, labels, cv_image, image.header)
 
-        scaled_masks = scale_masks(
-            masks.unsqueeze(1), cv_image.shape[:2], True
-        ).squeeze(1)
-        # check if the scaled masks are valid
-        if scaled_masks is None or scaled_masks.size(0) == 0:
-            self.get_logger().error("No scaled masks found", throttle_duration_sec=2)
-            self.pointcloud_publisher.publish(ClusteredPointsArray())
-            return None
+        masks = self._boxes_to_masks(boxes, cv_image.shape[:2])
         valid_points, class_indices = self.process_segmentation_mask(
-            scaled_masks.cpu().numpy(),
+            masks,
             lidar_array=lidar_array,
         )
         if valid_points is None or valid_points.size == 0:
@@ -303,7 +345,6 @@ class VisionNode(Node):
         if clustered_points is None or clustered_points.size == 0:
             self.pointcloud_publisher.publish(ClusteredPointsArray())
             return None
-        # self.publish_distance_output(clustered_points, carla_classes_indices)
         clustered_lidar_points_msg = array_to_clustered_points(
             self.get_clock().now(),
             clustered_points,
@@ -312,29 +353,37 @@ class VisionNode(Node):
         )
         self.pointcloud_publisher.publish(clustered_lidar_points_msg)
 
-        return cv_image, scaled_masks, carla_classes
+        return cv_image, boxes, carla_classes
 
-    def publish_image(self, image, image_header, scaled_masks, carla_classes):
+    def publish_image(self, image, image_header, boxes, carla_classes):
         """
-        Publishes the image to the given publisher
+        Publishes the image with the detected bounding boxes to RViz.
 
         Args:
             image (cv image): image to be published
-            publisher (rospy publisher): publisher to publish the image
+            image_header: stamp/frame for the image message
+            boxes (np.ndarray): detected bounding boxes (xyxy)
+            carla_classes (np.ndarray): CARLA class per box
         """
-        # Convert image to tensor and transpose dimensions
+        # Convert image to tensor (CHW, uint8)
         image_tensor = torch.from_numpy(image).permute(2, 0, 1).to(dtype=torch.uint8)
 
-        # Convert masks to boolean tensor
-        masks_tensor = scaled_masks.to(dtype=torch.bool)
-
-        # Get class colors
-        class_colors = np.array(carla_colors)[carla_classes].tolist()
-
-        # Draw segmentation masks on the image
-        drawn_images = draw_segmentation_masks(
-            image_tensor, masks_tensor, alpha=0.6, colors=class_colors
-        )
+        if len(boxes) > 0:
+            boxes_tensor = torch.as_tensor(boxes, dtype=torch.float32)
+            names = np.asarray(carla_class_names)[carla_classes].tolist()
+            class_colors = [
+                tuple(int(c) for c in rgb)
+                for rgb in np.array(carla_colors)[carla_classes].tolist()
+            ]
+            drawn_images = draw_bounding_boxes(
+                image_tensor,
+                boxes_tensor,
+                labels=names,
+                colors=class_colors,
+                width=3,
+            )
+        else:
+            drawn_images = image_tensor
 
         # Convert the drawn image back to numpy array and BGR format
         bgr_image = cv2.cvtColor(
@@ -443,11 +492,10 @@ class VisionNode(Node):
             carla_classes[valid_class_indices[selected_points_mask]],
         )
 
-    def process_traffic_lights(self, prediction, cv_image, image_header):
+    def process_traffic_lights(self, boxes, scores, labels, cv_image, image_header):
         # calculates, if a detected traffic light is plausible
         # gathers the indices of the bounding boxes of possible traffic lights
-        indices = (prediction.boxes.cls == 9).nonzero().squeeze().cpu().numpy()
-        indices = np.asarray([indices]) if indices.size == 1 else indices
+        indices = np.where(labels == TRAFFIC_LIGHT_LABEL)[0]
 
         msg = TrafficLightImages()
         msg.header = image_header
@@ -459,31 +507,34 @@ class VisionNode(Node):
         max_y = self.max_y  # 360  # middle of image
         min_prob = self.min_prob  # 0.30
 
+        cv_height, cv_width = cv_image.shape[:2]
+
         # calculate on every bounding box
         for index in indices:
-            # get size of the original image
-            cv_height, cv_width = cv_image.shape[:2]
-            # get the values of the current bounding box
-            box = prediction.boxes.cpu().data.numpy()[index]
+            box = boxes[index]
+            score = scores[index]
+            x1, y1, x2, y2 = box
             # calculate values about plausability
-            if box[4] < min_prob:
+            if score < min_prob:
                 continue
 
-            if (box[2] - box[0]) * 1.5 > box[3] - box[1]:
+            if (x2 - x1) * 1.5 > (y2 - y1):
                 continue  # ignore horizontal boxes
 
-            if box[3] > max_y:
+            if y2 > max_y:
                 continue
 
-            if box[0] < min_x:
+            if x1 < min_x:
                 continue
 
-            if box[2] > max_x:
+            if x2 > max_x:
                 continue
 
-            box = box[0:4].astype(int)
+            x1i, y1i, x2i, y2i = int(x1), int(y1), int(x2), int(y2)
             # crop image
-            segmented = cv_image[box[1] : box[3], box[0] : box[2]]
+            segmented = cv_image[y1i:y2i, x1i:x2i]
+            if segmented.size == 0:
+                continue
 
             traffic_light_image = self.bridge.cv2_to_imgmsg(segmented, encoding="rgb8")
             traffic_light_image.header = image_header

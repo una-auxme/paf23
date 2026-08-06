@@ -41,8 +41,16 @@ def get_distance(pos_1: np.ndarray, pos_2: np.ndarray):
 
 def location_to_gps(lat_ref: float, lon_ref: float, x: float, y: float):
     """Convert world coordinates to (lat,lon,z) coordinates
-       Copied from:
-       https://github.com/carla-simulator/scenario_runner/blob/master/srunner/tools/route_manipulation.py
+
+    Adapted from the CARLA ScenarioRunner
+    (``srunner/tools/route_manipulation.py``), which is licensed under the MIT
+    License:
+
+        Copyright (c) 2019 Computer Vision Center (CVC) at Universitat Autonoma
+        de Barcelona (UAB).
+        https://github.com/carla-simulator/scenario_runner
+        This work is licensed under the terms of the MIT license; for a copy,
+        see <https://opensource.org/licenses/MIT>.
 
     Args:
         lat_ref (float): reference lat value

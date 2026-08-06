@@ -11,15 +11,17 @@
     <param from="$(find-pkg-share perception)/config/perception.yaml"/>
 
     <!--
-        Image-Segmentation:
-      - yolov8x-seg
-      - yolo11n-seg
-      - yolo11s-seg
-      - yolo11m-seg
-      - yolo11l-seg
+        Object-detection models (torchvision, BSD-3-Clause):
+      - fasterrcnn_resnet50_fpn_v2       (best accuracy)
+      - fasterrcnn_mobilenet_v3_large_320_fpn (fastest)
+      - retinanet_resnet50_fpn_v2
+
+        Previously used AGPL-3.0 ultralytics (YOLOv8/YOLO11) models were
+        removed for license compatibility with this MIT project.
       -->
 
-    <param name="model" value="yolo11m-seg" />
+    <param name="model" value="fasterrcnn_resnet50_fpn_v2" />
+    <param name="score_threshold" value="0.5" />
   </node>
 
   <node pkg="perception" exec="traffic_light_node" name="TrafficLightNode">

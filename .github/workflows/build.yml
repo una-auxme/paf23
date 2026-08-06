@@ -17,29 +17,35 @@ jobs:
   build-and-push-image:
     name: Build and push image
     runs-on: [self-hosted, build]
-    outputs:
-      version: ${{ steps.build.version.outputs.version }}
     permissions:
       contents: write
       packages: write
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        # pinned: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+      - name: Compute short SHA (immutable per-commit tag)
+        id: short
+        run: echo "sha=$(echo '${{ github.sha }}' | cut -c1-12)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to the Container registry
-        uses: docker/login-action@v3
+        # pinned: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        # pinned: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Test build
         if: github.event_name == 'pull_request'
-        uses: docker/build-push-action@v6
+        # pinned: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           target: agent-deploy
@@ -51,23 +57,62 @@ jobs:
             PAF_UID: 1000
             PAF_GID: 1000
             BASE_FLAVOUR: cuda
+            OCI_IMAGE_REVISION: ${{ github.sha }}
+            OCI_IMAGE_VERSION: sha-${{ steps.short.outputs.sha }}
 
       - name: Build and push Docker image
         id: build
         if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
+        # pinned: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           target: agent-deploy
           file: ./build/docker/agent-ros2/Dockerfile
           push: true
-          # tag 'latest' and version on push to main, otherwise use the commit hash
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          # Publish BOTH a floating convenience tag and an immutable, per-commit
+          # tag so every published image is traceable to the exact PAF commit.
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ steps.short.outputs.sha }}
+          # Attach a SLSA in-toto provenance attestation (buildx-native) that
+          # records the full source -> image mapping.
+          provenance: true
           build-args: |
             PAF_USERNAME: paf
             PAF_UID: 1000
             PAF_GID: 1000
             BASE_FLAVOUR: cuda
+            OCI_IMAGE_REVISION: ${{ github.sha }}
+            OCI_IMAGE_VERSION: sha-${{ steps.short.outputs.sha }}
+
+      - name: Record image digest and provenance
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "Published image digest: ${{ steps.build.outputs.digest }}"
+          {
+            echo "### Published container image"
+            echo ""
+            echo "- digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "- tags: \`latest\`, \`sha-${{ steps.short.outputs.sha }}\` (immutable per-commit)"
+            echo "- provenance: SLSA in-toto attestation attached to the image"
+            echo "- license: MIT (see OCI label \`org.opencontainers.image.licenses\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate SPDX SBOM of the published image
+        if: github.event_name != 'pull_request'
+        # pinned: anchore/sbom-action@v0 (the moving v0 tag currently dereferences
+        # to this commit). Scans the pushed image to inventory all installed
+        # packages (Python/ROS/apt), not just the PAF source tree.
+        # NOTE: keep continue-on-error until a green run on this self-hosted
+        #       runner confirms syft can scan the pushed image via the login above;
+        #       then remove continue-on-error to enforce SBOM generation.
+        continue-on-error: true
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ steps.short.outputs.sha }}
+          format: spdx-json
+          artifact-name: sbom-paf-image.spdx.json
 
       - name: Save pull request artifact
         if: github.event_name == 'pull_request'
@@ -88,7 +133,8 @@ jobs:
           }' >> ./artifact/artifact.json
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        # pinned: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: artifact
           path: ./artifact/artifact.json

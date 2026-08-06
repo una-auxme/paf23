@@ -145,7 +145,9 @@ USER ${PAF_USERNAME}
 ENV AGENT_DEPS_ROS_WS=${INTERNAL_WORKSPACE_DIR}/agent_deps_ros2_ws
 RUN mkdir -p ${AGENT_DEPS_ROS_WS}/src
 WORKDIR ${AGENT_DEPS_ROS_WS}
-RUN git clone --recurse-submodules -b ${ROS_DISTRO} --single-branch https://github.com/Box-Robotics/ros2_numpy.git ./src/ros2_numpy
+# ros2_numpy (ref: ${ROS_DISTRO}) - pinned to immutable commit; build fails if the branch moves
+RUN git clone --recurse-submodules -b ${ROS_DISTRO} --single-branch https://github.com/Box-Robotics/ros2_numpy.git ./src/ros2_numpy && \
+  test "$(git -C ./src/ros2_numpy rev-parse HEAD)" = "d5ebf723e1d2457d36fa89bf021b212e340c3c11"
 
 # Install dependencies for pacakges above
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -158,9 +160,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   "
 
 # Do not install dependencies for py_trees_ros
-RUN git clone --recurse-submodules -b 2.3.0 --single-branch https://github.com/splintered-reality/py_trees_ros.git ./src/py_trees_ros
-RUN git clone --recurse-submodules -b 2.1.1 --single-branch https://github.com/splintered-reality/py_trees_ros_interfaces.git ./src/py_trees_ros_interfaces
-RUN git clone --recurse-submodules -b 0.2.5 --single-branch https://github.com/splintered-reality/py_trees_ros_viewer.git ./src/py_trees_ros_viewer
+# py_trees_ros (ref: 2.3.0) - pinned to immutable commit
+RUN git clone --recurse-submodules -b 2.3.0 --single-branch https://github.com/splintered-reality/py_trees_ros.git ./src/py_trees_ros && \
+  test "$(git -C ./src/py_trees_ros rev-parse HEAD)" = "0101e9d0959c23932cf5044f89a4670e05f6526b"
+# py_trees_ros_interfaces (ref: 2.1.1) - pinned to immutable commit
+RUN git clone --recurse-submodules -b 2.1.1 --single-branch https://github.com/splintered-reality/py_trees_ros_interfaces.git ./src/py_trees_ros_interfaces && \
+  test "$(git -C ./src/py_trees_ros_interfaces rev-parse HEAD)" = "14216c2ee6646ebf6cfc6385061723d5820e2720"
+# py_trees_ros_viewer (ref: 0.2.5) - pinned to immutable commit
+RUN git clone --recurse-submodules -b 0.2.5 --single-branch https://github.com/splintered-reality/py_trees_ros_viewer.git ./src/py_trees_ros_viewer && \
+  test "$(git -C ./src/py_trees_ros_viewer rev-parse HEAD)" = "9260e59479415150492f052ac2308c1f3d022a8f"
 
 RUN bash -c "source ${INTERNAL_WORKSPACE_DIR}/env.bash && \
   colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release" && \
@@ -178,7 +186,9 @@ USER ${PAF_USERNAME}
 ENV CARLA_ROS_WS=${INTERNAL_WORKSPACE_DIR}/carla_ros2_ws
 RUN mkdir -p ${CARLA_ROS_WS}/src
 WORKDIR ${CARLA_ROS_WS}
-RUN git clone --recurse-submodules -b ${LEADERBOARD_GIT_BRANCH} --single-branch https://github.com/carla-simulator/ros-bridge ./src/ros-bridge
+# carla ros-bridge (ref: ${LEADERBOARD_GIT_BRANCH}, MIT) - pinned to immutable commit
+RUN git clone --recurse-submodules -b ${LEADERBOARD_GIT_BRANCH} --single-branch https://github.com/carla-simulator/ros-bridge ./src/ros-bridge && \
+  test "$(git -C ./src/ros-bridge rev-parse HEAD)" = "6b7db446eadb457df53a2b72cc75d4829f82cab4"
 # Fix compilation dependency: https://github.com/carla-simulator/ros-bridge/issues/737
 RUN sed -i '/include_directories(include ${PCL_INCLUDE_DIRS})/a include_directories(${tf2_eigen_INCLUDE_DIRS})' ./src/ros-bridge/pcl_recorder/CMakeLists.txt
 # In jazzy, some deprecated header files got removed. This includes tf2_eigen.h (tf2_eigen.hpp should be used instead)
@@ -245,11 +255,15 @@ ENV PYTHONFAULTHANDLER=1
 USER ${PAF_USERNAME}
 # Scenario runner
 ENV SCENARIO_RUNNER_ROOT=${INTERNAL_WORKSPACE_DIR}/scenario_runner
-RUN git clone -b ${LEADERBOARD_GIT_BRANCH} --single-branch https://github.com/carla-simulator/scenario_runner.git $SCENARIO_RUNNER_ROOT
+# carla scenario_runner (ref: ${LEADERBOARD_GIT_BRANCH}, MIT) - pinned to immutable commit
+RUN git clone -b ${LEADERBOARD_GIT_BRANCH} --single-branch https://github.com/carla-simulator/scenario_runner.git $SCENARIO_RUNNER_ROOT && \
+  test "$(git -C $SCENARIO_RUNNER_ROOT rev-parse HEAD)" = "d7bcaf0dee05fdfd720bda45740b8c9f11ee478a"
 
 # Carla leaderboard
 ENV LEADERBOARD_ROOT=${INTERNAL_WORKSPACE_DIR}/leaderboard
-RUN git clone -b ${LEADERBOARD_GIT_BRANCH} --single-branch https://github.com/Zelberor/leaderboard.git $LEADERBOARD_ROOT
+# leaderboard (ref: ${LEADERBOARD_GIT_BRANCH}, MIT - Copyright (c) 2019 CARLA) - pinned fork commit
+RUN git clone -b ${LEADERBOARD_GIT_BRANCH} --single-branch https://github.com/Zelberor/leaderboard.git $LEADERBOARD_ROOT && \
+  test "$(git -C $LEADERBOARD_ROOT rev-parse HEAD)" = "44f0b4b2257f1879a39950c8da06fe4982d3d16b"
 
 WORKDIR ${INTERNAL_WORKSPACE_DIR}/scripts
 COPY --chmod=755 ${DOCKER_RESOURCE_BASE}/scripts/venv_install_requirements.sh \
@@ -291,6 +305,22 @@ RUN mkdir ${PAF_ROS_WS}
 ##### The agent-deploy image starts here #####
 ##############################################
 FROM agent AS agent-deploy
+
+# OCI image metadata, passed from CI as build-args so every published image is
+# traceable to the exact PAF commit and declares its license.
+# https://github.com/opencontainers/image-spec/blob/main/annotations.md
+# NOTE: image.licenses=MIT is accurate: the AGPL-3.0 ultralytics dependency was
+# removed from the agent (see THIRD_PARTY_LICENSES.md). Do not set this back to a
+# permissive value if a copyleft/AGPL component is reintroduced.
+ARG OCI_IMAGE_SOURCE=https://github.com/una-auxme/paf
+ARG OCI_IMAGE_REVISION
+ARG OCI_IMAGE_VERSION
+LABEL org.opencontainers.image.source="${OCI_IMAGE_SOURCE}" \
+  org.opencontainers.image.revision="${OCI_IMAGE_REVISION}" \
+  org.opencontainers.image.version="${OCI_IMAGE_VERSION}" \
+  org.opencontainers.image.licenses="MIT" \
+  org.opencontainers.image.title="paf-agent" \
+  org.opencontainers.image.description="PAF (Praktikum Autonomes Fahren) CARLA autonomous driving agent (ROS 2)"
 
 USER ${PAF_USERNAME}
 WORKDIR ${INTERNAL_WORKSPACE_DIR}
